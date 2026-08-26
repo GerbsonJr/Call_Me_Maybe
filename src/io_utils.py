@@ -2,7 +2,7 @@ import json
 import os
 from typing import Any
 from pydantic import ValidationError
-from models import FunctionDefinition, InputItem, OutputItem
+from .models import FunctionDefinition, InputItem, OutputItem
 
 
 def load_json(path: str) -> Any | None:

@@ -1,6 +1,6 @@
 from typing import Iterable
 from llm_sdk.llm_sdk import Small_LLM_Model
-from models import FunctionDefinition
+from .models import FunctionDefinition
 
 
 def build_function_choice_prompt(

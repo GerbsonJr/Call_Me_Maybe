@@ -1,6 +1,6 @@
 import json
 from typing import Any
-from models import FunctionDefinition
+from .models import FunctionDefinition
 
 
 def _extract_function_map(
