@@ -1,7 +1,7 @@
 from llm_sdk.llm_sdk import Small_LLM_Model
-from models import OutputItem
-from io_utils import load_functions_definition, load_input_prompts, save_results
-from decoder import decode_function_call
+from .models import OutputItem
+from .io_utils import load_functions_definition, load_input_prompts, save_results
+from .decoder import decode_function_call
 
 
 def run_app(functions_path: str, input_path: str, output_path: str) -> int:

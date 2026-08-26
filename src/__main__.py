@@ -1,5 +1,5 @@
-from src.io_utils import run_app
 import argparse
+from .app import run_app
 
 
 def main() -> None:
