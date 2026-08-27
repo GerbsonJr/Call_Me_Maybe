@@ -19,8 +19,7 @@ import json
 import math
 import re
 from typing import Any, Callable, Optional
-
-from llm_sdk.llm_sdk import Small_LLM_Model
+from llm_sdk import Small_LLM_Model
 from .models import FunctionDefinition
 
 
@@ -243,6 +242,10 @@ def decode_function_call(
             parameters[param_name] = generate_string_parameter(user_prompt)
         elif param_def.type == "boolean":
             parameters[param_name] = True
+        elif param_def.type == "boolean":
+            lowered = user_prompt.lower()
+            parameters[param_name] = (
+                "true" in lowered or "yes" in lowered or "on" in lowered)
         else:
             parameters[param_name] = None
 
