@@ -12,6 +12,11 @@ clean:
 	find . -type d -name ".mypy_cache" -prune -exec rm -rf {} +
 	find . -type d -name ".pytest_cache" -prune -exec rm -rf {} +
 
+fclean: clean
+	rm -rf .venv
+	rm -rf output/function_calling_results.json
+	rm -rf 
+
 lint:
 	uv run flake8 .
 	uv run mypy . --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs

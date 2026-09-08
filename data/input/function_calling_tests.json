@@ -4,5 +4,6 @@
   { "prompt": "Reverse the string 'hello'" },
   { "prompt": "What is the sum of 265 and 345?" },
   { "prompt": "Greet john" },
-  { "prompt": "What is the sum of Greet and john?" }
+  { "prompt": "What is the sum of Greet and john" },
+  { "prompt": "quanto e 5 sum 6 ?"}
 ]

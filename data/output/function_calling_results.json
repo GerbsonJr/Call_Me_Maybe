@@ -37,11 +37,19 @@
     }
   },
   {
-    "prompt": "What is the sum of Greet and john?",
+    "prompt": "What is the sum of Greet and john",
     "name": "fn_add_numbers",
     "parameters": {
       "a": 1000000.0,
       "b": 1000000.0
+    }
+  },
+  {
+    "prompt": "quanto e 5 sum 6 ?",
+    "name": "fn_add_numbers",
+    "parameters": {
+      "a": 5.0,
+      "b": 5.0
     }
   }
 ]
