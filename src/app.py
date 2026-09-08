@@ -1,6 +1,7 @@
 from llm_sdk import Small_LLM_Model
 from .models import OutputItem
-from .io_utils import load_functions_definition, load_input_prompts, save_results
+from .io_utils import (
+    load_functions_definition, load_input_prompts, save_results)
 from .decoder import decode_function_call
 
 

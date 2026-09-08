@@ -1,9 +1,9 @@
 [
   {
-    "prompt": "What is the sum of 2 and 3?",
+    "prompt": "What is the sum of 3 and 3?",
     "name": "fn_add_numbers",
     "parameters": {
-      "a": 2.0,
+      "a": 3.0,
       "b": 3.0
     }
   },
@@ -45,11 +45,11 @@
     }
   },
   {
-    "prompt": "quanto e 5 sum 6 ?",
+    "prompt": "quanto e 5 mais 6 ?",
     "name": "fn_add_numbers",
     "parameters": {
       "a": 5.0,
-      "b": 5.0
+      "b": 5000000.0
     }
   }
 ]

@@ -1,9 +1,9 @@
 [
-  { "prompt": "What is the sum of 2 and 3?" },
+  { "prompt": "What is the sum of 3 and 3?" },
   { "prompt": "Greet shrek" },
   { "prompt": "Reverse the string 'hello'" },
   { "prompt": "What is the sum of 265 and 345?" },
   { "prompt": "Greet john" },
   { "prompt": "What is the sum of Greet and john" },
-  { "prompt": "quanto e 5 sum 6 ?"}
+  { "prompt": "quanto e 5 mais 6 ?"}
 ]

@@ -54,10 +54,12 @@ def choose_function_name(
 
         # NOTE:
         # This is a temporary/simple stage. We do NOT decode from logits yet.
-        # We use a conservative fallback until constrained decoding is implemented.
+        # We use a conservative fallback until
+        # constrained decoding is implemented.
         _ = logits  # keep explicit usage for lint clarity
 
-        # Temporary fallback: first function (will be replaced by constrained decoding)
+        # Temporary fallback: first function
+        # (will be replaced by constrained decoding)
         return functions[0].name
 
     except Exception as exc:  # pylint: disable=broad-except
