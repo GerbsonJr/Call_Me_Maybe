@@ -17,10 +17,17 @@ dev = [
 ]
 
 [tool.mypy]
+files = ["src"]
 exclude = [
     "^\\.venv/",
     "^llm_sdk/"
 ]
+ignore_missing_imports = true
+follow_imports = "skip"
+disallow_untyped_defs = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_ignores = true
 
 [tool.uv.sources]
 llm-sdk = { path = "llm_sdk" }

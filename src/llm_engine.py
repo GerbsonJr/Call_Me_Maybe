@@ -60,9 +60,9 @@ def choose_function_name(
 
         # Temporary fallback: first function
         # (will be replaced by constrained decoding)
-        return functions[0].name
+        return str(functions[0].name)
 
     except Exception as exc:  # pylint: disable=broad-except
         print(
             f"Warning: model selection failed, using fallback. Details: {exc}")
-        return functions[0].name
+        return str(functions[0].name)
