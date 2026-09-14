@@ -1,4 +1,7 @@
 SHELL := /bin/bash
+UV := $(HOME)/.local/bin/uv
+SGOINFRE := $(shell [ -d /sgoinfre/$(USER) ] && echo /sgoinfre/$(USER) || echo $(HOME))
+UV_ENV := UV_CACHE_DIR=$(SGOINFRE)/.cache/uv UV_PROJECT_ENVIRONMENT=$(SGOINFRE)/.venv_cmm HF_HOME=$(SGOINFRE)/.cache/huggingface
 
 BLUE := \033[1;34m
 GREEN := \033[1;32m
@@ -10,16 +13,20 @@ RESET := \033[0m
 
 install:
 	@printf "$(BLUE)▶ Installing dependencies...$(RESET)\n"
-	@uv sync
+	@curl -LsSf https://astral.sh/uv/install.sh | sh
+	@mkdir -p $(SGOINFRE)/.cache/uv
+	@mkdir -p $(SGOINFRE)/.venv_cmm
+	@mkdir -p $(SGOINFRE)/.cache/huggingface
+	@$(UV_ENV) $(UV) sync
 	@printf "$(GREEN)✔ Installation complete$(RESET)\n"
 
 run:
 	@printf "$(BLUE)▶ Running project...$(RESET)\n"
-	@uv run python -m src
+	@$(UV_ENV) $(UV) run python -m src
 
 debug:
 	@printf "$(YELLOW)▶ Starting debugger...$(RESET)\n"
-	@uv run python -m pdb src/__main__.py
+	@$(UV_ENV) $(UV) run python -m pdb -m src/__main__.py
 
 clean:
 	@printf "$(YELLOW)▶ Cleaning caches...$(RESET)\n"
@@ -36,13 +43,17 @@ fclean: clean
 
 lint:
 	@printf "$(BLUE)▶ Running lint checks...$(RESET)\n"
-	@uv run flake8 .
-	@uv run mypy . --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs
+	@$(UV_ENV) $(UV) run flake8 .
+	@$(UV_ENV) $(UV) run mypy . --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs
 	@printf "$(GREEN)✔ Lint passed$(RESET)\n"
 
 re: fclean
 	@printf "$(BLUE)▶ Installing dependencies...$(RESET)\n"
-	@uv sync
+	@curl -LsSf https://astral.sh/uv/install.sh | sh
+	@mkdir -p $(SGOINFRE)/.cache/uv
+	@mkdir -p $(SGOINFRE)/.venv_cmm
+	@mkdir -p $(SGOINFRE)/.cache/huggingface
+	@$(UV_ENV) $(UV) sync
 	@printf "$(GREEN)✔ Installation complete$(RESET)\n"
 
 help:

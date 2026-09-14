@@ -8,6 +8,7 @@ dependencies = [
     "numpy>=2.0.0",
     "pydantic>=2.0",
     "llm-sdk",
+    "accelerate>=0.20.0",
 ]
 
 [dependency-groups]
