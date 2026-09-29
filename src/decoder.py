@@ -196,11 +196,86 @@ def generate_string_parameter(user_prompt: str) -> str:
             if len(parts) >= 3 and parts[1].strip():
                 return parts[1].strip()
 
-    lowered = user_prompt.lower().strip()
-    if lowered.startswith("greet "):
-        return user_prompt.strip()[6:].strip(" \t\n\r.,!?")
+    stripped = user_prompt.strip()
+    lowered = stripped.lower()
 
-    words = user_prompt.strip().split()
+    COMMANDS = {
+        "greet": "greet",
+        "hi": "greet",
+        "hello": "greet",
+        "hey": "greet",
+        "hey there": "greet",
+        "hiya": "greet",
+        "yo": "greet",
+        "good morning": "greet",
+        "good afternoon": "greet",
+        "good evening": "greet",
+
+        "welcome": "greet",
+        "extend greetings": "greet",
+        "send greetings": "greet",
+        "give regards": "greet",
+        "offer greetings": "greet",
+        "pay respects": "greet",
+
+        "say hello": "greet",
+        "say hi": "greet",
+        "say hey": "greet",
+        "say good morning": "greet",
+        "say good evening": "greet",
+        "send regards": "greet",
+        "send my regards": "greet",
+        "send my greetings": "greet",
+        "pass greetings": "greet",
+        "pass my greetings": "greet",
+
+        "shout out": "greet",
+        "give a shout out": "greet",
+        "give a nod to": "greet",
+        "wave at": "greet",
+        "say what's up to": "greet",
+        "say hi to": "greet",
+        "say hello to": "greet",
+        "check in with": "greet",
+
+        "holla at": "greet",
+        "holler at": "greet",
+        "give props to": "greet",
+        "dap up": "greet",
+        "give love to": "greet",
+        "show love to": "greet",
+
+        "cumprimenta": "greet",
+        "cumprimente": "greet",
+        "cumprimentar": "greet",
+        "sauda": "greet",
+        "saudar": "greet",
+        "diz oi": "greet",
+        "diz olá": "greet",
+        "manda cumprimentos": "greet",
+        "envia cumprimentos": "greet",
+
+        "manda um oi": "greet",
+        "manda um olá": "greet",
+        "dá um oi": "greet",
+        "dá um alô": "greet",
+        "dá um salve": "greet",
+        "dá um toque": "greet",
+
+        "apresente cumprimentos": "greet",
+        "envie saudações": "greet",
+        "mande saudações": "greet",
+        "transmita cumprimentos": "greet",
+    }
+
+    for cmd in COMMANDS.keys():
+        if lowered.startswith(cmd):
+            after = stripped[len(cmd):]
+            after = after.lstrip(" \t\n\r.,:-")
+            first_word = after.split()[0]
+            return first_word.strip(".,!?")
+
+    words = stripped.split()
     return words[-1].strip(".,!?") if words else ""
 
 
