@@ -9,7 +9,7 @@ YELLOW := \033[1;33m
 RED := \033[1;31m
 RESET := \033[0m
 
-.PHONY: install run debug clean fclean lint lint-strict help re
+.PHONY: install run debug clean fclean lint help re
 
 install:
 	@printf "$(BLUE)▶ Installing dependencies...$(RESET)\n"

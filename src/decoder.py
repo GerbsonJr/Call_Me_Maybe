@@ -1,37 +1,56 @@
 """Constrained decoding engine.
 
-Implements true constrained decoding as required by the subject (V.3.3):
-at every generation step, the model's logits are masked so that only
-tokens compatible with the target grammar remain selectable. The model
-never "spontaneously" produces JSON — every token is filtered before
-selection, guaranteeing valid structure and schema compliance by
-construction.
+Implements constrained decoding as required by the subject (V.3.3): the
+model's logits are masked at every generation step so that only tokens
+compatible with a valid grammar remain selectable.
+
+DESIGN NOTE ON PARAMETER VALUES (read this before touching this file):
+Early versions of this module let the model generate parameter values as
+free text, token by token, only checking that the *shape* stayed valid
+(digits for numbers, non-quote characters for strings). In testing, this
+was unreliable with the small 0.6B base model: numbers ran away into
+nonsense ("2" became "2e+22"), strings leaked the model's own commentary
+("shrek" became "shrek is a name that is used in..."), or got stuck
+repeating a token forever ("hello" became "hellohellohello...").
+
+The fix is NOT to keep tuning the free-generation stopping heuristic — a
+tiny, non-instruction-tuned model simply cannot reliably reproduce an
+exact number or word from scratch, character by character. Instead,
+candidate values are enumerated directly from the user's prompt (numbers
+present in the text, quoted substrings, individual words), and constrained
+decoding is used to have the model *choose* among those candidates via a
+token-level trie — the same technique already used for function-name
+selection. This guarantees every produced value is an exact, verbatim
+match for something that was actually in the prompt (no truncation, no
+runaway repetition), while the selection *among* candidates still comes
+from the model's own logits, not from string-matching heuristics.
 
 ASSUMPTION TO VERIFY: `Small_LLM_Model.get_path_to_vocab_file()` is assumed
 to return a JSON file mapping token string -> token id (the common
-BPE/vocab.json format). If your SDK's vocab file has a different shape
-(e.g. id -> token, or a merges list), adjust `_load_vocab` accordingly.
-Leading-space tokens are assumed to use a marker such as "Ġ" (GPT-style
-BBPE); adjust SPACE_MARKERS if your tokenizer uses e.g. sentencepiece "▁".
+BPE/vocab.json format). Leading-space tokens are assumed to use a marker
+such as "Ġ" (GPT-style BBPE), and newline/tab tokens "Ċ"/"ĉ" respectively;
+adjust the marker tables below if your tokenizer differs.
 """
 
 import json
 import math
 import re
 from typing import Any, Callable, Optional
+
 from llm_sdk import Small_LLM_Model
 from .models import FunctionDefinition
 
 
 SPACE_MARKERS = ("Ġ", "▁")
+NEWLINE_MARKERS = {"Ċ": "\n", "ĉ": "\t"}
 NUMBER_PARTIAL = re.compile(r"-?\d*(\.\d*)?$")
 NUMBER_COMPLETE = re.compile(r"-?\d+(\.\d+)?$")
+STRING_STOP_CHARS = ('"', "'", "{", "}", "[", "]", "\n", "\t")
+BOOLEAN_OPTIONS = ("true", "false")
+
 NUMBER_CAPTURE = re.compile(r"-?\d+(?:\.\d+)?")
-BOOLEAN_TRUE_PATTERN = re.compile(r"\b(true|yes|on|enable|enabled)\b")
-
-
-def _extract_numbers_from_prompt(user_prompt: str) -> list[float]:
-    return [float(m.group(0)) for m in NUMBER_CAPTURE.finditer(user_prompt)]
+QUOTE_CAPTURE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
+WORD_CAPTURE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+")
 
 
 def _load_vocab(model: Small_LLM_Model) -> dict[int, str]:
@@ -47,6 +66,8 @@ def _token_text(id_to_token: dict[int, str], token_id: int) -> str:
     token_str = id_to_token.get(token_id, "")
     for marker in SPACE_MARKERS:
         token_str = token_str.replace(marker, " ")
+    for marker, real_char in NEWLINE_MARKERS.items():
+        token_str = token_str.replace(marker, real_char)
     return token_str
 
 
@@ -61,13 +82,10 @@ def _log_softmax(logits: list[float]) -> list[float]:
 def _flatten_ids(token_tensor: Any) -> list[int]:
     """Normalize the encoder's tensor output into a flat list of ints."""
     raw_ids = token_tensor.tolist()
-
     if isinstance(raw_ids, list) and raw_ids and isinstance(raw_ids[0], list):
         raw_ids = raw_ids[0]
-
     if not isinstance(raw_ids, list):
         return []
-
     return [int(x) for x in raw_ids]
 
 
@@ -95,9 +113,8 @@ class ConstrainedDecoder:
         At each step every candidate token's logit is masked to -inf unless
         `is_valid_continuation(generated_so_far, candidate_token_text)` is
         True. Among the remaining tokens, the one with the highest log
-        probability is selected (this is where the LLM's own logits decide
-        the output, not a heuristic). Stops when `is_complete` is True, no
-        valid token remains, or `max_new_tokens` is reached.
+        probability is selected. Stops when `is_complete` is True, no valid
+        token remains, or `max_new_tokens` is reached.
         """
         current_ids = list(input_ids)
         generated_text = ""
@@ -131,152 +148,172 @@ class ConstrainedDecoder:
         return generated_text
 
 
-def choose_function_name(
+def select_from_candidates(
     decoder: ConstrainedDecoder,
     prompt_ids: list[int],
-    functions: list[FunctionDefinition],
+    candidates: list[str],
+    max_new_tokens: int = 32,
 ) -> str:
-    names = [fn.name for fn in functions]
+    """Pick one of a fixed set of exact
+    candidate strings via constrained decoding.
+
+    A token is only accepted while the accumulated text is a prefix of at
+    least one candidate. This is the same trie-based technique used for
+    function-name selection, generalized to any closed set of exact
+    strings: it guarantees the result is always one of the candidates
+    verbatim (no truncation, no drift), while the choice among them still
+    comes from the model's own logits.
+    """
+    if not candidates:
+        return ""
+    if len(candidates) == 1:
+        return candidates[0]
 
     def is_valid(current: str, candidate: str) -> bool:
         trial = (current + candidate).strip()
-        return trial == "" or any(name.startswith(trial) for name in names)
+        return trial == "" or any(c.startswith(trial) for c in candidates)
 
     def is_complete(current: str) -> bool:
-        return current.strip() in names
+        return current.strip() in candidates
 
     result = decoder.generate(
-        input_ids=prompt_ids,
-        is_valid_continuation=is_valid,
-        is_complete=is_complete,
-        max_new_tokens=16,
-    ).strip()
-
-    if result in names:
-        return result
-    raise ValueError(f"Could not select a valid function name: {result!r}")
-
-
-def generate_number_parameter(
-    decoder: ConstrainedDecoder,
-    prompt_ids: list[int],
-    max_new_tokens: int = 8,
-) -> float:
-    """Generate a numeric parameter value under constrained decoding.
-
-    Tokens are only accepted while the text so far still matches a partial
-    number pattern (optional leading '-', digits, optional single '.').
-    """
-
-    def is_valid(current: str, candidate: str) -> bool:
-        trial = (current + candidate).strip()
-        return bool(NUMBER_PARTIAL.fullmatch(trial))
-
-    def is_complete(current: str) -> bool:
-        # Never stop early on our own signal: let generation run to
-        # max_new_tokens or until no digit-extension remains valid, then
-        # take the longest complete numeric prefix below.
-        return False
-
-    raw = decoder.generate(
         input_ids=prompt_ids,
         is_valid_continuation=is_valid,
         is_complete=is_complete,
         max_new_tokens=max_new_tokens,
     ).strip()
 
-    match = NUMBER_COMPLETE.match(raw) if raw else None
-    return float(match.group(0)) if match else 0.0
+    return result if result in candidates else candidates[0]
 
 
-def generate_string_parameter(user_prompt: str) -> str:
-    for quote_char in ("'", '"'):
-        if user_prompt.count(quote_char) >= 2:
-            parts = user_prompt.split(quote_char)
-            if len(parts) >= 3 and parts[1].strip():
-                return parts[1].strip()
+def choose_function_name(
+    decoder: ConstrainedDecoder,
+    prompt_ids: list[int],
+    functions: list[FunctionDefinition],
+) -> str:
+    """Select a function name via trie-constrained
+    decoding over the LLM's logits."""
+    names = [fn.name for fn in functions]
+    result = select_from_candidates(
+        decoder, prompt_ids, names, max_new_tokens=16)
+    if result not in names:
+        raise ValueError(f"Could not select a valid function name: {result!r}")
+    return result
 
-    stripped = user_prompt.strip()
-    lowered = stripped.lower()
 
-    COMMANDS = {
-        "greet": "greet",
-        "hi": "greet",
-        "hello": "greet",
-        "hey": "greet",
-        "hey there": "greet",
-        "hiya": "greet",
-        "yo": "greet",
-        "good morning": "greet",
-        "good afternoon": "greet",
-        "good evening": "greet",
+def _find_number_candidates(text: str) -> list[str]:
+    """Return every numeric substring that literally appears in text, in
+    order, WITHOUT deduplicating — if the same number appears twice (e.g.
+    "sum of 0 and 0"), both occurrences must remain available so each
+    parameter can claim its own, rather than the second one falling
+    through to less reliable free-form generation."""
+    return [match.group(0) for match in NUMBER_CAPTURE.finditer(text)]
 
-        "welcome": "greet",
-        "extend greetings": "greet",
-        "send greetings": "greet",
-        "give regards": "greet",
-        "offer greetings": "greet",
-        "pay respects": "greet",
 
-        "say hello": "greet",
-        "say hi": "greet",
-        "say hey": "greet",
-        "say good morning": "greet",
-        "say good evening": "greet",
-        "send regards": "greet",
-        "send my regards": "greet",
-        "send my greetings": "greet",
-        "pass greetings": "greet",
-        "pass my greetings": "greet",
+def _find_quoted_candidates(text: str) -> list[str]:
+    """Return substrings enclosed in single or double quotes in text.
+    An empty pair of quotes ('' or "") yields an empty-string candidate —
+    this matters because "reverse the string ''" must resolve to "",
+    not silently skip to some other word in the prompt."""
+    results: list[str] = []
+    for match in QUOTE_CAPTURE.finditer(text):
+        value = (match.group(1) if match.group(1)
+                 is not None else match.group(2))
+        if value is not None and value not in results:
+            results.append(value)
+    return results
 
-        "shout out": "greet",
-        "give a shout out": "greet",
-        "give a nod to": "greet",
-        "wave at": "greet",
-        "say what's up to": "greet",
-        "say hi to": "greet",
-        "say hello to": "greet",
-        "check in with": "greet",
 
-        "holla at": "greet",
-        "holler at": "greet",
-        "give props to": "greet",
-        "dap up": "greet",
-        "give love to": "greet",
-        "show love to": "greet",
+def _find_word_candidates(text: str) -> list[str]:
+    """Return the distinct alphabetic words that appear in text, in order."""
+    seen: list[str] = []
+    for match in WORD_CAPTURE.finditer(text):
+        word = match.group(0)
+        if word not in seen:
+            seen.append(word)
+    return seen
 
-        "cumprimenta": "greet",
-        "cumprimente": "greet",
-        "cumprimentar": "greet",
-        "sauda": "greet",
-        "saudar": "greet",
-        "diz oi": "greet",
-        "diz olá": "greet",
-        "manda cumprimentos": "greet",
-        "envia cumprimentos": "greet",
 
-        "manda um oi": "greet",
-        "manda um olá": "greet",
-        "dá um oi": "greet",
-        "dá um alô": "greet",
-        "dá um salve": "greet",
-        "dá um toque": "greet",
+def _sort_by_appearance(text: str, raw_values: list[str]) -> list[str]:
+    """Order raw numeric substrings by where they first appear in text.
 
-        "apresente cumprimentos": "greet",
-        "envie saudações": "greet",
-        "mande saudações": "greet",
-        "transmita cumprimentos": "greet",
-    }
+    The model decides WHICH numbers are relevant for the call (correctly
+    ignoring distractors, e.g. a stated age mixed in with the actual sum);
+    this just maps the already-chosen values back onto parameters in the
+    order they were written, matching the convention used throughout the
+    subject's own examples (first number -> first parameter)."""
+    return sorted(raw_values, key=lambda v: text.find(v))
 
-    for cmd in COMMANDS.keys():
-        if lowered.startswith(cmd):
-            after = stripped[len(cmd):]
-            after = after.lstrip(" \t\n\r.,:-")
-            first_word = after.split()[0]
-            return first_word.strip(".,!?")
 
-    words = stripped.split()
-    return words[-1].strip(".,!?") if words else ""
+def is_valid(current: str, candidate: str) -> bool:
+    trial = (current + candidate).strip()
+    if NUMBER_PARTIAL.fullmatch(trial):
+        return True
+    return (bool(NUMBER_COMPLETE.fullmatch(current.strip()))
+            and candidate.strip() == "")
+
+
+def is_complete(current: str) -> bool:
+    stripped = current.strip()
+    return bool(NUMBER_COMPLETE.fullmatch(stripped)) and current != stripped
+
+
+def generate_string_parameter(
+    decoder: ConstrainedDecoder,
+    prompt_ids: list[int],
+    max_new_tokens: int = 8,
+) -> str:
+    """Fallback free-form string generation, used only when the prompt has
+    no quoted text and no words for the model to select from."""
+
+    def is_valid(current: str, candidate: str) -> bool:
+        return not any(ch in candidate for ch in STRING_STOP_CHARS)
+
+    def is_complete(current: str) -> bool:
+        return current.strip() != "" and current[-1].isspace()
+
+    raw = decoder.generate(
+        input_ids=prompt_ids,
+        is_valid_continuation=is_valid,
+        is_complete=is_complete,
+        max_new_tokens=max_new_tokens,
+    )
+    return raw.strip()
+
+
+def generate_boolean_parameter(
+    decoder: ConstrainedDecoder,
+    prompt_ids: list[int],
+) -> bool:
+    """Select a boolean value via
+    trie-constrained decoding over {true, false}."""
+    result = select_from_candidates(
+        decoder, prompt_ids, list(BOOLEAN_OPTIONS), max_new_tokens=4
+    )
+    return result == "true"
+
+
+def _build_param_prompt(
+    user_prompt: str,
+    fn_name: str,
+    param_name: str,
+    param_type: str,
+    already_filled: dict[str, Any],
+) -> str:
+    """Build the instruction prompt used
+    to select/generate a parameter value."""
+    filled_line = ""
+    if already_filled:
+        pairs = ", ".join(f"{k}={v!r}" for k, v in already_filled.items())
+        filled_line = f"Already assigned parameters: {pairs}\n"
+    return (
+        f'User request: "{user_prompt}"\n'
+        f"Selected function: {fn_name}\n"
+        f"{filled_line}"
+        f"Provide the value for parameter"
+        f" '{param_name}' (type: {param_type}).\n"
+        f"Value:"
+    )
 
 
 def decode_function_call(
@@ -284,7 +321,14 @@ def decode_function_call(
     user_prompt: str,
     functions: list[FunctionDefinition],
 ) -> dict[str, Any]:
-    """Decode a full function call using constrained decoding end-to-end."""
+    """Decode a full function call using constrained decoding end-to-end.
+
+    The function name and every parameter value are selected by the model
+    via logit-masked decoding. Numeric and string parameters are, whenever
+    possible, selected from candidates found verbatim in the prompt (see
+    module docstring for why free-form character generation was dropped)
+    rather than generated from scratch.
+    """
     if not functions:
         return {"name": "", "parameters": {}}
 
@@ -292,40 +336,76 @@ def decode_function_call(
     fn_map = {fn.name: fn for fn in functions}
 
     name_prompt = (
-        "Available functions:\n"
+        "Examples of how to map a request to a function name:\n"
+        + "\n".join(
+            f'Request about: "{fn.description}" -> Function name: {fn.name}'
+            for fn in functions
+        )
+        + "\n\nAvailable functions:\n"
         + "\n".join(f"- {fn.name}: {fn.description}" for fn in functions)
         + f'\n\nUser request: "{user_prompt}"\nFunction name:'
     )
-    prompt_ids = decoder.encode(name_prompt)
-    chosen_name = choose_function_name(decoder, prompt_ids, functions)
+    chosen_name = choose_function_name(decoder,
+                                       decoder.encode(name_prompt), functions)
     fn_def = fn_map[chosen_name]
 
     parameters: dict[str, Any] = {}
-    prompt_numbers = _extract_numbers_from_prompt(user_prompt)
-    number_idx = 0
+    remaining_numbers = _find_number_candidates(user_prompt)
+    used_strings: set[str] = set()
+    number_assignments: list[tuple[str, str]] = []
+
+    quoted_candidates = _find_quoted_candidates(user_prompt)
+    word_candidates = _find_word_candidates(user_prompt)
 
     for param_name, param_def in fn_def.parameters.items():
-        if param_def.type in ("number", "integer"):
-            if number_idx < len(prompt_numbers):
-                value = prompt_numbers[number_idx]
-                number_idx += 1
-            else:
-                value = 0.0
+        param_prompt = _build_param_prompt(
+            user_prompt, chosen_name, param_name, param_def.type, parameters
+        )
+        param_ids = decoder.encode(param_prompt)
 
-            parameters[param_name] = (
-                int(value) if param_def.type == "integer" else value
-            )
+        if param_def.type in ("number", "integer"):
+            if remaining_numbers:
+                chosen = select_from_candidates(decoder,
+                                                param_ids, remaining_numbers)
+                remaining_numbers.remove(chosen)  # removes only ONE occurrence
+                number_assignments.append((param_name, chosen))
+                parameters[param_name] = float(chosen)
+            else:
+                value = generate_number_parameter(decoder, param_ids)
+                parameters[param_name] = (
+                    int(value) if param_def.type == "integer" else value
+                )
 
         elif param_def.type == "string":
-            parameters[param_name] = generate_string_parameter(user_prompt)
+            if quoted_candidates:
+                candidates = [c for c in quoted_candidates
+                              if c not in used_strings]
+            else:
+                candidates = [c for c in word_candidates
+                              if c not in used_strings]
+            if candidates:
+                chosen = select_from_candidates(decoder, param_ids, candidates)
+                used_strings.add(chosen)
+                parameters[param_name] = chosen
+            else:
+                parameters[param_name] = generate_string_parameter(decoder,
+                                                                   param_ids)
 
         elif param_def.type == "boolean":
-            lowered = user_prompt.lower()
-            parameters[param_name] = bool(
-                BOOLEAN_TRUE_PATTERN.search(lowered)
-            )
+            parameters[param_name] = generate_boolean_parameter(decoder,
+                                                                param_ids)
 
         else:
             parameters[param_name] = None
+
+    if len(number_assignments) >= 2:
+        raw_values = [raw for _, raw in number_assignments]
+        ordered_raw = _sort_by_appearance(user_prompt, raw_values)
+        for (param_name, _), raw in zip(number_assignments, ordered_raw):
+            param_def = fn_def.parameters[param_name]
+            value = float(raw)
+            parameters[param_name] = (
+                int(value) if param_def.type == "integer" else value
+            )
 
     return {"name": chosen_name, "parameters": parameters}
