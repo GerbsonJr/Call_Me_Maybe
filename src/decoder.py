@@ -396,7 +396,9 @@ def decode_function_call(
                                                                 param_ids)
 
         else:
-            parameters[param_name] = None
+            raise ValueError(
+                f"Unsupported parameter type: {param_def.type}"
+            )
 
     if len(number_assignments) >= 2:
         raw_values = [raw for _, raw in number_assignments]

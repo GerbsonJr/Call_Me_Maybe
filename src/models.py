@@ -3,7 +3,7 @@ from typing import Any
 
 
 ALLOWED_JSON_TYPES = {
-    "string", "number", "boolean", "integer", "object", "array", "null",
+    "string", "number", "boolean", "integer",
 }
 
 
