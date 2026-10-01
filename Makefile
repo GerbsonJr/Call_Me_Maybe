@@ -26,7 +26,7 @@ run:
 
 debug:
 	@printf "$(YELLOW)▶ Starting debugger...$(RESET)\n"
-	@$(UV_ENV) $(UV) run python -m pdb -m src/__main__.py
+	@$(UV_ENV) $(UV) run python -m pdb -m src
 
 clean:
 	@printf "$(YELLOW)▶ Cleaning caches...$(RESET)\n"
@@ -38,6 +38,7 @@ clean:
 fclean: clean
 	@printf "$(YELLOW)▶ Removing virtual environment and outputs...$(RESET)\n"
 	@rm -rf .venv
+	@rm -rf "$(SGOINFRE)/.venv_cmm"
 	@rm -f data/output/function_calling_results.json
 	@printf "$(GREEN)✔ Full cleanup done$(RESET)\n"
 

@@ -1,6 +1,3 @@
-Sim. Aqui está todo o conteúdo em um único ficheiro `README.md`:
-
-````markdown name=README.md
 *This project has been created as part of the 42 curriculum by gmateus-.*
 
 # Call Me Maybe
