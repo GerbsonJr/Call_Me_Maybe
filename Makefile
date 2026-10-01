@@ -64,5 +64,4 @@ help:
 	@printf "  make clean        - remove caches\n"
 	@printf "  make fclean       - remove caches, .venv and output\n"
 	@printf "  make lint         - run flake8 and mypy\n"
-	@printf "  make lint-strict  - run strict checks\n"
 	@printf "  make help         - show this help\n"
