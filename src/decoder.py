@@ -194,8 +194,8 @@ def choose_function_name(
     """Select a function name via trie-constrained
     decoding over the LLM's logits."""
     names = [fn.name for fn in functions]
-    result = select_from_candidates(
-        decoder, prompt_ids, names, max_new_tokens=16)
+    result = select_from_candidates(decoder, prompt_ids,
+                                    names, max_new_tokens=16)
     if result not in names:
         raise ValueError(f"Could not select a valid function name: {result!r}")
     return result
@@ -245,17 +245,36 @@ def _sort_by_appearance(text: str, raw_values: list[str]) -> list[str]:
     return sorted(raw_values, key=lambda v: text.find(v))
 
 
-def is_valid(current: str, candidate: str) -> bool:
-    trial = (current + candidate).strip()
-    if NUMBER_PARTIAL.fullmatch(trial):
-        return True
-    return (bool(NUMBER_COMPLETE.fullmatch(current.strip()))
-            and candidate.strip() == "")
+def generate_number_parameter(
+    decoder: ConstrainedDecoder,
+    prompt_ids: list[int],
+    max_new_tokens: int = 10,
+) -> float:
+    """Fallback free-form numeric generation, used only when no number
+    literally appears in the prompt for the model to select from (e.g. a
+    request implying a value rather than stating it)."""
 
+    def is_valid(current: str, candidate: str) -> bool:
+        trial = (current + candidate).strip()
+        if NUMBER_PARTIAL.fullmatch(trial):
+            return True
+        return bool(NUMBER_COMPLETE.fullmatch
+                    (current.strip())) and candidate.strip() == ""
 
-def is_complete(current: str) -> bool:
-    stripped = current.strip()
-    return bool(NUMBER_COMPLETE.fullmatch(stripped)) and current != stripped
+    def is_complete(current: str) -> bool:
+        stripped = current.strip()
+        return bool(NUMBER_COMPLETE.fullmatch
+                    (stripped)) and current != stripped
+
+    raw = decoder.generate(
+        input_ids=prompt_ids,
+        is_valid_continuation=is_valid,
+        is_complete=is_complete,
+        max_new_tokens=max_new_tokens,
+    ).strip()
+
+    match = NUMBER_COMPLETE.match(raw) if raw else None
+    return float(match.group(0)) if match else 0.0
 
 
 def generate_string_parameter(
@@ -285,8 +304,8 @@ def generate_boolean_parameter(
     decoder: ConstrainedDecoder,
     prompt_ids: list[int],
 ) -> bool:
-    """Select a boolean value via
-    trie-constrained decoding over {true, false}."""
+    """Select a boolean value via trie-constrained
+    decoding over {true, false}."""
     result = select_from_candidates(
         decoder, prompt_ids, list(BOOLEAN_OPTIONS), max_new_tokens=4
     )
@@ -310,8 +329,8 @@ def _build_param_prompt(
         f'User request: "{user_prompt}"\n'
         f"Selected function: {fn_name}\n"
         f"{filled_line}"
-        f"Provide the value for parameter"
-        f" '{param_name}' (type: {param_type}).\n"
+        f"Provide the value for parameter '{param_name}'"
+        f" (type: {param_type}).\n"
         f"Value:"
     )
 
@@ -365,8 +384,8 @@ def decode_function_call(
 
         if param_def.type in ("number", "integer"):
             if remaining_numbers:
-                chosen = select_from_candidates(decoder,
-                                                param_ids, remaining_numbers)
+                chosen = select_from_candidates(decoder, param_ids,
+                                                remaining_numbers)
                 remaining_numbers.remove(chosen)  # removes only ONE occurrence
                 number_assignments.append((param_name, chosen))
                 parameters[param_name] = float(chosen)
