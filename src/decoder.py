@@ -38,7 +38,6 @@ adjust the marker tables below if your tokenizer differs.
 """
 
 import json
-import math
 import re
 from typing import Any, Callable, Optional
 
@@ -73,14 +72,6 @@ def _token_text(id_to_token: dict[int, str], token_id: int) -> str:
     for marker, real_char in NEWLINE_MARKERS.items():
         token_str = token_str.replace(marker, real_char)
     return token_str
-
-
-def _log_softmax(logits: list[float]) -> list[float]:
-    """Numerically stable log-softmax over a list of logits."""
-    max_logit = max(logits)
-    shifted = [logit - max_logit for logit in logits]
-    log_sum_exp = math.log(sum(math.exp(s) for s in shifted))
-    return [s - log_sum_exp for s in shifted]
 
 
 def _flatten_ids(token_tensor: Any) -> list[int]:
@@ -120,6 +111,12 @@ class ConstrainedDecoder:
     def __init__(self, model: Small_LLM_Model) -> None:
         self.model = model
         self.id_to_token = _load_vocab(model)
+        # Token texts are converted once, not at every generation step.
+        size = max(self.id_to_token) + 1 if self.id_to_token else 0
+        self.token_texts: list[str] = [""] * size
+        for token_id in self.id_to_token:
+            self.token_texts[token_id] = _token_text(
+                self.id_to_token, token_id)
 
     def encode(self, text: str) -> list[int]:
         """Tokenize text into a flat list of input ids."""
@@ -137,22 +134,24 @@ class ConstrainedDecoder:
 
         At each step every candidate token's logit is masked to -inf unless
         `is_valid_continuation(generated_so_far, candidate_token_text)` is
-        True. Among the remaining tokens, the one with the highest log
-        probability is selected. Stops when `is_complete` is True, no valid
-        token remains, or `max_new_tokens` is reached.
+        True. Among the remaining tokens, the one with the highest logit
+        (same ordering as log probability) is selected. Stops when
+        `is_complete` is True, no valid token remains, or `max_new_tokens`
+        is reached.
         """
         current_ids = list(input_ids)
         generated_text = ""
 
         for _ in range(max_new_tokens):
             logits = self.model.get_logits_from_input_ids(current_ids)
-            log_probs = _log_softmax(logits)
+            texts = self.token_texts
+            known = len(texts)
 
             best_token_id: Optional[int] = None
             best_score = float("-inf")
 
-            for token_id, score in enumerate(log_probs):
-                token_text = _token_text(self.id_to_token, token_id)
+            for token_id, score in enumerate(logits):
+                token_text = texts[token_id] if token_id < known else ""
                 if not token_text:
                     continue
                 if not is_valid_continuation(generated_text, token_text):
@@ -164,7 +163,7 @@ class ConstrainedDecoder:
             if best_token_id is None:
                 break
 
-            generated_text += _token_text(self.id_to_token, best_token_id)
+            generated_text += self.token_texts[best_token_id]
             current_ids.append(best_token_id)
 
             if is_complete(generated_text):
@@ -191,12 +190,14 @@ class ConstrainedDecoder:
 
         for _ in range(max_new_tokens):
             logits = self.model.get_logits_from_input_ids(current_ids)
+            texts = self.token_texts
+            known = len(texts)
 
             best_token_id: Optional[int] = None
             best_score = float("-inf")
 
             for token_id, score in enumerate(logits):
-                token_text = _token_text(self.id_to_token, token_id)
+                token_text = texts[token_id] if token_id < known else ""
                 if not token_text or not _is_json_string_safe(token_text):
                     continue
                 if score > best_score:
@@ -206,7 +207,7 @@ class ConstrainedDecoder:
             if best_token_id is None:
                 break
 
-            combined = raw + _token_text(self.id_to_token, best_token_id)
+            combined = raw + self.token_texts[best_token_id]
             quote_pos = _first_unescaped_quote(combined)
             if quote_pos is not None:
                 return combined[:quote_pos]
@@ -358,6 +359,12 @@ def generate_string_parameter(
     decoded with json.loads so that `\\\\d+` becomes the regex `\\d+`.
     """
     raw = decoder.generate_json_string(prompt_ids, max_new_tokens)
+    # The prompt ends at the opening quote, so a first token such as "Ġ*"
+    # carries a space that belongs to the tokenizer, not to the value.
+    # The model's token choice is kept; only that one space is dropped
+    # (a value made only of spaces is left untouched).
+    if raw[:1] == " " and raw.strip():
+        raw = raw[1:]
     try:
         decoded = json.loads(f'"{raw}"')
     except json.JSONDecodeError:
@@ -405,12 +412,18 @@ def _build_string_prompt(
     fn_def: FunctionDefinition,
     param_name: str,
     already_filled: dict[str, Any],
+    worked_example: bool = False,
 ) -> str:
     """Build a JSON-continuation prompt for a string parameter.
 
     The prompt ends right after the opening quote of `param_name`'s value,
     with the parameters already decided written out before it, so the
     model simply continues the JSON it would naturally write.
+
+    `worked_example` adds one solved call for a different request. It is
+    only used when the value must be synthesized (it is not in the
+    request), because there the model otherwise tends to copy a piece of
+    the request instead of writing a new value (e.g. "34" as a regex).
     """
     signature = ", ".join(
         f"{name}: {param.type}" for name, param in fn_def.parameters.items()
@@ -424,13 +437,27 @@ def _build_string_prompt(
         '{"name": ' + json.dumps(fn_def.name)
         + ', "parameters": {' + ", ".join(items)
     )
+    example = ""
+    if worked_example:
+        example = (
+            "Solved examples for different requests:\n"
+            'Request: "Replace all digits in \\"a1b22\\" with X"\n'
+            'Call: {"name": "fn_replace", "parameters": '
+            r'{"source_string": "a1b22", "regex": "\\d+", '
+            '"replacement": "X"}}\n'
+            'Request: "Replace all spaces in \\"a b\\" with underscores"\n'
+            'Call: {"name": "fn_replace", "parameters": '
+            r'{"source_string": "a b", "regex": "\\s+", '
+            '"replacement": "_"}}\n\n'
+        )
     return (
         f"Function: {fn_def.name}({signature})\n"
         f"Description: {fn_def.description}\n"
         "Write the call as JSON. Copy string values from the request when "
         "it contains them. Regular expressions use JSON escaping, "
-        r'e.g. "\\d+" matches one or more digits.' + "\n"
-        f"Request: {json.dumps(user_prompt, ensure_ascii=False)}\n"
+        r'e.g. "\\d+" matches one or more digits.' + "\n\n"
+        + example
+        + f"Request: {json.dumps(user_prompt, ensure_ascii=False)}\n"
         "Call: " + call_prefix
     )
 
@@ -439,8 +466,12 @@ def decode_function_call(
     model: Small_LLM_Model,
     user_prompt: str,
     functions: list[FunctionDefinition],
+    decoder: Optional[ConstrainedDecoder] = None,
 ) -> dict[str, Any]:
     """Decode a full function call using constrained decoding end-to-end.
+
+    Pass a `decoder` built once for the whole run to avoid reading the
+    vocabulary file again for every prompt.
 
     The function name and every parameter value are selected by the model
     via logit-masked decoding. Numeric and string parameters are, whenever
@@ -451,7 +482,8 @@ def decode_function_call(
     if not functions:
         return {"name": "", "parameters": {}}
 
-    decoder = ConstrainedDecoder(model)
+    if decoder is None:
+        decoder = ConstrainedDecoder(model)
     fn_map = {fn.name: fn for fn in functions}
 
     name_prompt = (
@@ -513,8 +545,14 @@ def decode_function_call(
                 used_strings.add(chosen)
                 parameters[param_name] = chosen
             else:
+                synth_ids = decoder.encode(
+                    _build_string_prompt(
+                        user_prompt, fn_def, param_name, parameters,
+                        worked_example=True,
+                    )
+                )
                 parameters[param_name] = generate_string_parameter(
-                    decoder, string_ids
+                    decoder, synth_ids
                 )
 
         elif param_def.type == "boolean":
