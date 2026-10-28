@@ -1,21 +1,15 @@
 [
   {
-    "prompt": "What is the sum of 2 and 3?"
+    "prompt":"What is the sum of 2 and 3?"
   },
   {
-    "prompt": "What is the sum of 265 and 345?"
+    "prompt": "What is the sum of 29975 and 345?"
   },
   {
     "prompt": "Greet shrek"
   },
   {
-    "prompt": "quanto e sete mais oito"
-  },
-  {
     "prompt": "Reverse the string 'hello'"
-  },
-  {
-    "prompt": "Reverse the string 'world'"
   },
   {
     "prompt": "What is the square root of 16?"

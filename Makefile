@@ -40,6 +40,7 @@ fclean: clean
 	@rm -rf .venv
 	@rm -rf "$(SGOINFRE)/.venv_cmm"
 	@rm -f data/output/function_calling_results.json
+	@rm -rd data/output
 	@printf "$(GREEN)✔ Full cleanup done$(RESET)\n"
 
 lint:

@@ -342,6 +342,16 @@ is_complete
 
 `is_complete` determines whether the generated text is complete and can be returned.
 
+The vocabulary file returned by the SDK is read as a `{token: id}` JSON map. Space and newline markers of the tokenizer (`Ġ`, `▁`, `Ċ`, `ĉ`) are converted back to real characters before any rule is applied.
+
+### Pipeline for one prompt
+
+1. The function name is chosen first (see below).
+2. The parameters of the chosen function are then filled one by one, in the order they appear in the function definition. How each value is produced depends on its type.
+3. The result is returned as `{"name": ..., "parameters": {...}}`.
+
+Most values are produced by **closed-set selection**: the code lists the exact strings that are acceptable, and the model picks one of them through the same token-by-token mechanism used for function names. A value that does not exist in the prompt (for example a regular expression) is **generated** by the model instead.
+
 ### Function name selection
 
 The available function names are used as the allowed candidate set.
@@ -354,7 +364,7 @@ fn_greet
 fn_reverse_string
 ```
 
-The decoder only allows tokens that are prefixes of at least one valid function name.
+The decoder only allows tokens that are prefixes of at least one valid function name. Generation is complete when the text equals one of the names.
 
 If the current generated text is:
 
@@ -373,24 +383,21 @@ if "greet" in prompt:
     ...
 ```
 
+The text the model reads before choosing contains the list of functions and, for each function, one line that pairs its description with its name. These lines are built at runtime from the definitions file, so nothing is hardcoded. Without them, short imperative requests such as `Say hello to Maria` were sent to the wrong function.
+
 ### Number parameters
 
-Numbers are constrained using a partial-number grammar that accepts values such as:
+Every numeric substring of the prompt (optional minus sign, digits, optional decimal part) becomes a candidate. Repeated numbers are kept, so `0 and 0` offers two candidates.
 
-```text
-10
--5
-3.14
--0.25
-```
+For each number parameter the model selects one of the remaining candidates with the same prefix-based decoding, and that occurrence is removed from the list.
 
-The decoder does not allow arbitrary text to be used as a numeric value.
+After all number parameters are filled, the chosen values are sorted by the position where they appear in the prompt and assigned to the parameters in definition order (first number written, first parameter). The model decides **which** numbers are used, which matters when the prompt contains numbers that are not arguments (for example `A lorena tem 50 anos e quer saber quanto e 70 mais 47`); the code decides their **order**.
 
-When possible, numeric candidates are extracted from the user's prompt and the model selects among those candidates using constrained decoding.
+If a number parameter has no candidate left, a fallback generation accepts only text that matches a partial number (`10`, `-5`, `3.14`) and stops after a complete number followed by whitespace, with a small token limit.
 
 ### String parameters
 
-Quoted strings are extracted from the prompt when possible.
+Quoted text (single or double quotes) is extracted from the prompt. An empty pair of quotes gives an empty-string candidate. If the prompt has no quoted text, the distinct alphabetic words of the prompt are the candidates. Candidates already used by another string parameter are removed.
 
 For example:
 
@@ -404,9 +411,15 @@ produces the candidate:
 hello world
 ```
 
-The decoder can then select the appropriate candidate using the model's logits.
+When candidates remain, the model selects one with the prefix-based decoding. The text it reads is a partial JSON call: the function signature and description, the request, and the call written up to the opening quote of the value, with the parameters already decided written before it.
 
-If no suitable quoted candidate exists, the implementation may use constrained free-form generation as a fallback.
+When no candidate remains, the value does not exist in the prompt and has to be written by the model. This is what happens for the regular expression of a request such as `Replace all numbers in "..." with NUMBERS`. In this case:
+
+- the text read by the model ends right after the opening quote of the value and also contains two solved examples (one where the replacement is copied from the request, one where the request names a symbol and the value is the symbol itself);
+- at every step, tokens that cannot appear raw inside a JSON string (line breaks, tabs, special tokens) are masked, and the highest-scoring remaining token is taken;
+- if that token contains an unescaped double quote, the value ends there and only the text before the quote is kept (maximum 48 tokens);
+- the body is decoded as a JSON string, so the model writes `\\d+` and the stored value is `\d+`;
+- a single leading space produced by the tokenizer is removed.
 
 ### Boolean parameters
 
@@ -418,6 +431,18 @@ false
 ```
 
 The model is not allowed to produce arbitrary text for a boolean value.
+
+### What the model decides and what the code decides
+
+| Decision | Made by |
+|---|---|
+| Function name | Model (logits over the valid names) |
+| Which numbers are arguments, when the prompt has extra numbers | Model |
+| Which quoted text or word goes to which string parameter, when there are several | Model |
+| Boolean value | Model |
+| Regular expression, replacement, or any string that is not in the prompt | Model (generated token by token) |
+| Order of the numbers among the parameters | Code (position in the prompt) |
+| Value when only one candidate exists | Code (no model call is made) |
 
 ---
 
@@ -437,18 +462,21 @@ The following objects are validated:
 
 This prevents malformed input data from silently entering the decoding pipeline.
 
-### Candidate-based extraction
+### Closed-set selection for values that exist in the prompt
 
-Small language models can struggle to reproduce exact values token by token. For example, the model may transform a simple string into a longer explanation or generate an invalid number.
+Early versions let the model generate every value token by token, only checking that the shape stayed valid. With a 0.6B model this was unreliable: a number kept growing (`2` became `2e+22`), a name was followed by the model's own commentary, and a word was repeated without end.
 
-To reduce this behavior, the implementation extracts possible values from the input prompt and uses constrained decoding to select among them.
+Tuning the stopping rule did not fix it, so the approach changed: the exact acceptable strings are listed from the prompt and the model only chooses among them. A selected value is always an exact copy of something in the prompt, so it cannot be truncated, extended or repeated.
 
-This approach improves exact copying for:
+### Generation only for values that are not in the prompt
 
-- numbers;
-- quoted strings;
-- names;
-- short text values.
+Some arguments cannot be copied. For these, the value is generated as the body of a JSON string. The text read by the model is a JSON call that stops at the opening quote of the value, which is the continuation a language model finds natural, and the end of the value is the closing quote.
+
+The two solved examples in that text are the only fixed text about a kind of function in the project. They are used only when a value has to be invented, so they do not influence names, numbers or quoted strings.
+
+### Positional order for numbers
+
+Choosing a number independently for each parameter produced swapped values (`-10 and 4` gave `a=4, b=-10`). Sorting the chosen numbers by their position in the prompt keeps the order of the sentence.
 
 ### Model-driven function choice
 
@@ -478,51 +506,40 @@ Input files are read using context managers and are validated before processing.
 
 The project prioritizes reliable structured output over maximum generation speed.
 
+### How accuracy was measured
+
+There is no reference answer file. Each result was checked by hand against what the prompt asks for. The output file is always valid JSON because it is written with Python's JSON module, and parameter types follow the definition by construction (number gives a float, string gives a string, boolean gives a boolean).
+
+### Results
+
+| Prompt set | Prompts | Correct function | Correct parameters | Time |
+|---|---|---|---|---|
+| Subject-style set (add, greet, reverse) | 51 | TBD | TBD | TBD |
+| Extended set (adds square root and regex substitution) | 11 | 11 | 11 | TBD |
+
+Time was measured on: TBD (CPU or GPU, memory).
+
+In the extended set, the regular expression generated for `Replace all vowels in 'Programming is fun' with asterisks` is `([aeiou])`. It is correct for that text, but it does not match uppercase vowels (see Known Limitations).
+
 ### Main performance costs
 
 The most expensive operations are:
 
 - loading the Qwen model;
-- loading the vocabulary;
+- reading the vocabulary file;
 - running inference for every decoding step;
-- checking the possible vocabulary tokens;
-- processing multiple prompts.
-
-### Expected performance
-
-The project is intended to process the provided evaluation dataset within the time limit specified by the subject. Actual execution time depends on:
-
-- CPU or GPU availability;
-- available memory;
-- model download status;
-- number of prompts;
-- size of the vocabulary;
-- number of generated tokens.
-
-### Current benchmark status
-
-Final accuracy and timing measurements should be recorded after running the complete dataset on the target evaluation machine.
-
-The following values should be measured before submission:
-
-- total number of prompts;
-- number of correctly selected functions;
-- number of correctly extracted parameters;
-- total processing time;
-- number of failed prompts;
-- percentage of valid JSON outputs.
+- scoring the whole vocabulary at every decoding step.
 
 ### Known bottleneck
 
-The decoder may inspect many vocabulary tokens at each generation step. This provides strong control over valid output but increases computation time.
+At each generation step the decoder converts and checks every token of the vocabulary in Python. This gives strong control over valid output but increases computation time. The vocabulary file is also read again for every prompt.
 
-Potential future optimizations include:
+Possible optimizations:
 
-- caching normalized vocabulary tokens;
-- precomputing valid token groups;
+- reading the vocabulary and converting token texts once for the whole run;
+- precomputing the tokens that can start each candidate;
 - building a token-level trie;
-- avoiding repeated vocabulary conversions;
-- batching compatible operations.
+- skipping the full-vocabulary scan when only one candidate is possible.
 
 ---
 
@@ -545,17 +562,36 @@ Subword tokenizers may represent spaces and newlines with special markers such a
 ĉ
 ```
 
-The decoder normalizes these markers before applying its validation rules.
+At first only the space markers were converted. A newline token (`Ċ`) was therefore not recognised as a line break, and the model's commentary leaked into a string value (`shrek` followed by a whole sentence). Converting the newline and tab markers fixed it.
+
+The tokenizer also attaches a space to some tokens: the model chose a token for ` *` where `*` was wanted, and the value started with a space. The value is now stripped of that single leading space after the model has chosen its tokens.
 
 ### Exact value extraction
 
-It is difficult for a small model to generate an exact string or number from scratch. A value may be repeated, extended, truncated, or followed by an explanation.
+It is difficult for a small model to generate an exact string or number from scratch. Values were repeated, extended, truncated, or followed by an explanation. One stopping rule treated a single digit as a complete number and cut `265` to `2`.
 
-Candidate extraction combined with constrained selection reduces this problem.
+The fix was closed-set selection (see Design Decisions), not a better stopping rule.
+
+### Choosing the wrong function
+
+Requests that start with a verb phrase, such as `Say hello to Maria` or `Say good morning to Maria`, were sent to `fn_add_numbers`, and the same prompt gave the same wrong answer every time because decoding is greedy. Adding the description-to-name lines to the text read by the model fixed every phrasing that was tested.
 
 ### Ambiguous prompts
 
 Some prompts contain multiple numbers or multiple possible strings. The decoder must select the values that best match the selected function while respecting the available schema.
+
+Specific cases that had to be handled:
+
+- the same number twice (`0 and 0`): repeated numbers are kept, and one occurrence is removed per use;
+- an empty string (`Reverse the string ''`): the quote pattern accepts an empty pair, otherwise the value silently became another word of the prompt;
+- numbers in the wrong order: see Positional order for numbers;
+- a number that is not an argument (an age mentioned next to the real sum): the model selects the numbers.
+
+### Values that are not in the prompt
+
+The regular expression of a substitution request cannot be copied. The first attempt used the same generation as for other strings and produced values such as `34,233,`. Three changes were needed: the text read by the model became a JSON call ending inside the opening quote, characters such as `[`, `]` and `\` were allowed, and generation stopped at the closing quote instead of at the first whitespace.
+
+Two further problems appeared after that. The model copied `34` from the source text as the regex, which a solved example fixed. Then the model wrote the word `asterisk` instead of `*`, which a second example fixed. Because these examples were added after observing failures, other phrasings may still fail.
 
 ### Dynamic function schemas
 
@@ -563,86 +599,44 @@ The function definitions are loaded at runtime and may change during evaluation.
 
 ---
 
+## Known Limitations
+
+- **Frequent words win over names.** In `Tell Maria hello` the name selected is `hello`, not `Maria`. The same prompt gives the same result every time.
+- **Multi-word names.** When a name is not quoted, only one word is selected (`John Doe` gives `John`).
+- **Numbers.** Numbers are read as digits with an optional sign and decimal part. Thousands separators (`1,000`) and ranges (`3-4`) are read wrongly, and numbers written in words are not extracted.
+- **Generated values are not verified.** A generated regex may be valid but too narrow (`([aeiou])` misses uppercase vowels), and the result depends on how the request is phrased.
+- **Quotes inside sentences.** Any pair of single or double quotes is treated as quoted text, so two apostrophes in the same sentence (`it's Bob's party`) can be read as a quoted string.
+- **Non-ASCII text.** Only the space and newline markers are converted back to text. Byte-level tokens for accented characters are not, so values with accented letters may be selected or generated wrongly.
+- **Parameter types.** Only string, number, integer and boolean parameters are supported. Other types raise an error.
+
+---
+
 ## Testing Strategy
 
-The project should be tested at several levels.
+The project was tested by running the complete program with `make run` on several prompt sets and reading every result by hand.
 
-### Input validation tests
+### Prompt sets
 
-Test the behavior for:
+- **51 prompts with the three subject functions** (add, greet, reverse):
+  - sums with negative, decimal, very large and repeated numbers (`0 and 0`, `3 and 3`);
+  - a sum with an extra number that is not an argument;
+  - requests in English and Portuguese;
+  - greetings in lowercase and uppercase, with titles (`Dr. Smith`) and with two-word names;
+  - strings with spaces, punctuation, special characters and an empty string.
+- **11 prompts with extra functions**: square root, and substitution with a regular expression (quoted text with an apostrophe inside, a request with three quoted texts).
+- **20 greeting phrasings with the same name**, used to find which wording sent the request to the wrong function. A prompt repeated three times gave the same result each time, which confirms that decoding is deterministic.
 
-- missing files;
-- invalid JSON;
-- JSON objects where arrays are expected;
-- empty function lists;
-- empty prompts;
-- missing required fields;
-- unsupported parameter types;
-- invalid function definitions.
+### Method
 
-### Decoder tests
+Each wrong result was turned into a test prompt, the cause was found in the code, and the full sets were run again after every change to check that nothing that worked before had broken.
 
-Test:
+### Static checks
 
-- function selection from multiple candidates;
-- function names with shared prefixes;
-- negative numbers;
-- decimal numbers;
-- integer parameters;
-- boolean parameters;
-- quoted strings;
-- empty strings;
-- strings containing punctuation;
-- repeated values;
-- large values;
-- prompts containing distractor numbers.
+`make lint` (flake8 and mypy with the flags required by the subject): result TBD.
 
-### Integration tests
+### Not done
 
-Run the complete program using:
-
-```bash
-uv run python -m src
-```
-
-Then verify that:
-
-- the process exits correctly;
-- the output file is generated;
-- the output is valid JSON;
-- every result has the required keys;
-- every selected function exists in the definitions;
-- all required parameters are present;
-- no unexpected parameters are present;
-- parameter values have the expected types.
-
-### Manual examples
-
-Example prompts to test:
-
-```text
-What is the sum of 3 and 3?
-```
-
-```text
-Greet Alice
-```
-
-```text
-Reverse the string 'hello'
-```
-
-```text
-Add -25 and -75.
-```
-
-```text
-Please calculate 0.5 plus 0.25.
-```
-
-```text
-Reverse the string "hello, world!"
-```
+The checks were manual. There is no automated test suite in the repository.
 
 ---
 
@@ -702,6 +696,27 @@ uv run python -m src \
     }
   }
 ]
+```
+
+### Example with a generated value
+
+For a prompt such as:
+
+```text
+Replace all numbers in "Hello 34 I'm 233 years old" with NUMBERS
+```
+
+the result was:
+
+```json
+{
+  "name": "fn_substitute_string_with_regex",
+  "parameters": {
+    "source_string": "Hello 34 I'm 233 years old",
+    "regex": "\\d+",
+    "replacement": "NUMBERS"
+  }
+}
 ```
 
 ---
