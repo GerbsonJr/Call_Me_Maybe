@@ -564,7 +564,7 @@ def decode_function_call(
                 f"Unsupported parameter type: {param_def.type}"
             )
 
-    if len(number_assignments) >= 2:
+    if len(number_assignments) >= 1:
         raw_values = [raw for _, raw in number_assignments]
         ordered_raw = _sort_by_appearance(user_prompt, raw_values)
         for (param_name, _), raw in zip(number_assignments, ordered_raw):
